@@ -1,0 +1,2470 @@
+-- The fourth step of creating Database KMS
+-- The next (5th tep) is performing out of VFP module that populates the created here tables
+--
+SET NOCOUNT ON
+GO
+USE kms
+GO
+--IF EXISTS (SELECT * FROM sys.types WHERE name='sex') DROP TYPE Sex
+--CREATE TYPE Sex FROM TINYINT NOT NULL
+--GO
+
+-- Creating dbo.moves table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.moves')) DROP TABLE dbo.moves
+CREATE TABLE dbo.moves (recid int IDENTITY(1,1) PRIMARY KEY CLUSTERED, id int, isdeleted bit NOT NULL DEFAULT 0,
+scn char(3), jt char(1), dp date, form tinyint, spos tinyint, d_gzk tinyint, predst tinyint, predstid int)
+GO
+-- Creating dbo.moves table
+
+-- Creating dbo.auxinfo table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.auxinfo')) DROP TABLE dbo.auxinfo
+CREATE TABLE dbo.auxinfo (recid int IDENTITY(1,1) PRIMARY KEY CLUSTERED, id int, isdeleted bit NOT NULL DEFAULT 0,
+pv char(3), nz varchar(5), kl tinyint NOT NULL DEFAULT 0, cont varchar(40),
+gr char(3) check(gr = upper(gr)) references nsi.countries(code),
+mr varchar(max), comment varchar(max), ktg varchar(1), lpuid dec(4))
+GO
+-- Creating dbo.auxinfo table
+
+-- Creating dbo.fio table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.fio')) DROP TABLE dbo.fio
+CREATE TABLE dbo.fio (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+fam varchar(40) NOT NULL, d_fam char(1) NOT NULL DEFAULT SPACE(1) REFERENCES nsi.codfio (code), im varchar(40) NOT NULL, 
+d_im char(1) NOT NULL DEFAULT SPACE(1) REFERENCES nsi.codfio (code), ot varchar(40),
+d_ot char(1) NOT NULL DEFAULT SPACE(1) REFERENCES nsi.codfio (code))
+GO
+CREATE CLUSTERED INDEX idx_fio_uniq ON dbo.fio (id, parentid)
+GO 
+ALTER TABLE dbo.fio ADD CONSTRAINT PK_fio PRIMARY KEY (recid asc)
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekfio')) DROP FUNCTION dbo.seekfio
+GO
+CREATE FUNCTION dbo.seekfio (@fam varchar(40), @im varchar(40), @ot varchar(40)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.fio WHERE fam=@fam AND im=@im AND ot=@ot AND IsTop=1
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addfio')) DROP PROCEDURE dbo.addfio
+GO
+CREATE PROCEDURE dbo.addfio
+ (@id int=0, @fam varchar(40)=null, @d_fam char(1)=' ', @im varchar(40)=null, @d_im varchar(40)=null,
+  @ot varchar(40)=null, @d_ot char(1)=' ', @recid int=0 output)
+AS
+print 'Procedure AddFio fired!'
+IF (@id is null OR @id=0) OR (@fam is null or @fam='') OR (@im is null or @im='') RETURN -1
+--IF dbo.seekenp(@enp)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.fam (id,fam,d_fam,im,d_im,ot,d_ot) VALUES (@id,@fam,@d_fam,@im,@d_im,@ot,@d_ot)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modfio')) DROP PROCEDURE dbo.modfio
+GO
+CREATE PROCEDURE dbo.modfio
+ (@in_id int, @fam varchar(40)=null, @d_fam char(1)=' ', @im varchar(40)=null, @d_im varchar(40)=null,
+  @ot varchar(40)=null, @d_ot char(1)=' ', @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModFio fired!'
+	IF @in_id IS NULL OR @in_id=0 RETURN(0)
+
+	IF (@fam is null or @fam='') AND (@im is null or @im='') AND (@ot is null or @ot='')
+     BEGIN RETURN(0) END 
+
+	BEGIN TRANSACTION
+	UPDATE dbo.fio SET fam=COALESCE(@fam, fam), d_fam=COALESCE(@d_fam, d_fam), im=COALESCE(@im, im),
+		d_im=COALESCE(@d_im, d_im), ot=COALESCE(@ot, ot), d_ot=COALESCE(@d_ot, d_ot) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.fio');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModFio','TR') IS NOT NULL DROP TRIGGER uModFio
+GO
+CREATE TRIGGER dbo.uModFio ON dbo.fio
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	print 'uModFio trigger fired!'
+
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END /*попытка редактировать неактуальныю запись!*/
+
+--	DECLARE @enp varchar(16)
+--	SET @enp = (SELECT enp FROM inserted)
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime, @isdeleted bit,
+		@fam varchar(40), @d_fam char(1), @im varchar(40), @d_im char(1), @ot varchar(40), @d_ot char(1)
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		fam, d_fam, im, d_im, ot, d_ot FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@fam, @d_fam, @im, @d_im, @ot, @d_ot
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	UPDATE dbo.fio SET istop=0, version_stop=sysdatetime() FROM deleted/*inserted*/ WHERE fio.recid=/*inserted*/deleted.recid
+
+	INSERT INTO dbo.fio
+	(id, parentid, version_start, version_stop, istop, isdeleted, fam, d_fam, im, d_im, ot, d_ot) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @fam, @d_fam, @im, @d_im, @ot, @d_ot)
+
+	DECLARE @recid int= (select recid from deleted)
+
+	UPDATE dbo.fio SET childid=SCOPE_IDENTITY() FROM deleted WHERE fio.recid=deleted.recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModFio ON dbo.fio
+GO
+
+IF OBJECT_ID('uDelFio','TR') IS NOT NULL DROP TRIGGER uDelFio
+GO
+CREATE TRIGGER dbo.uDelFio ON dbo.fio
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelFio trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END /*Попытка удалить неактуальную запись!*/
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.fio SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelFio ON dbo.fio
+GO
+-- Creating dbo.fio table
+
+/*
+-- Creating dbo.vs table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.vs')) DROP TABLE dbo.vs
+CREATE TABLE dbo.vs (recid int IDENTITY(1,1), id int null, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+pv char(5), vs char(9), dp date, dt date)
+GO
+CREATE CLUSTERED INDEX idx_vs_uniq ON dbo.vs (id, parentid)
+GO 
+ALTER TABLE dbo.vs ADD CONSTRAINT PK_vs PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_vs_unik ON dbo.vs (vs) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekvs')) DROP FUNCTION dbo.seekvs
+GO
+CREATE FUNCTION dbo.seekvs (@vs char(9)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.vs WHERE vs=@vs AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekvs')) DROP PROCEDURE dbo.pseekvs
+GO
+CREATE PROCEDURE dbo.pseekvs(@vs char(9)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.vs WHERE vs=@vs AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addvs')) DROP PROCEDURE dbo.addvs
+GO
+CREATE PROCEDURE dbo.addvs
+ (@id int, @pv char(5), @vs char(9), @dp date=null, @dt date=null, @recid int=0 output)
+AS
+print 'Procedure AddVs fired!'
+IF @id is null or @id<1 RETURN(-1)
+IF (@pv is null or @pv='') or (@vs is null or @vs='') or (@dp is null) RETURN(-1)
+IF dbo.seekvs(@vs)>0 RETURN(0)
+BEGIN TRY 
+  INSERT INTO dbo.vs (id, pv, vs, dp, dt) VALUES (@id, @pv, @vs, @dp, @dt)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modvs')) DROP PROCEDURE dbo.modvs
+GO
+CREATE PROCEDURE dbo.modvs
+ (@in_id int, @pv char(5)=null, @vs char(9)=null, @dp date=null, @dt date=null, @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModVs fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(-1)
+
+	IF @pv is null AND @vs is null AND @dp is null AND @dt is null
+     BEGIN DELETE FROM dbo.vs WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekvs(@vs)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN(0)
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.vs SET pv=COALESCE(@pv, pv), vs=COALESCE(@vs, vs), dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt)
+		WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.vs');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModVs','TR') IS NOT NULL DROP TRIGGER uModVs
+GO
+CREATE TRIGGER dbo.uModVs ON dbo.vs
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	print 'uModVs trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT IsTop FROM deleted)
+--	SET @IsTop = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+--	DECLARE @vs char(9)
+--	SET @vs = (SELECT vs FROM inserted)
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @pv varchar(5), @vs char(9), @dp date, @dt date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		pv, vs, dp, dt FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@pv, @vs, @dp, @dt
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.vs SET istop=0, version_stop=sysdatetime() FROM inserted WHERE vs.recid=@recid
+
+	INSERT INTO dbo.vs
+	(id, parentid, version_start, version_stop, istop, isdeleted, pv, vs, dp, dt) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @pv, @vs, @dp, @dt)
+
+	UPDATE dbo.vs SET childid=SCOPE_IDENTITY() WHERE vs.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModVs ON dbo.vs
+GO
+
+IF OBJECT_ID('uDelVs','TR') IS NOT NULL DROP TRIGGER uDelVs
+GO
+CREATE TRIGGER dbo.uDelVs ON dbo.vs
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelVs trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.vs SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelVs ON dbo.vs
+GO
+*/
+-- Creating dbo.vs table
+/*
+-- Creating dbo.kms table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.kms')) DROP TABLE dbo.kms
+CREATE TABLE dbo.kms (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+s_card varchar(12), n_card varchar(32), dp date)
+GO
+CREATE CLUSTERED INDEX idx_kms_uniq ON dbo.kms (id, parentid)
+GO 
+ALTER TABLE dbo.kms ADD CONSTRAINT PK_kms PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_kms_unik ON dbo.kms (s_card,n_card) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekkms')) DROP FUNCTION dbo.seekkms
+GO
+CREATE FUNCTION dbo.seekkms (@s_card varchar(12), @n_card varchar(32)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.kms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekkms')) DROP PROCEDURE dbo.pseekkms
+GO
+CREATE PROCEDURE dbo.pseekkms(@s_card varchar(12)='', @n_card varchar(32), @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.kms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addkms')) DROP PROCEDURE dbo.addkms
+GO
+CREATE PROCEDURE dbo.addkms
+ (@id int, @s_card varchar(12), @n_card varchar(32), @dp date=null, @recid int=0 output)
+AS
+print 'Procedure Addkms fired!'
+IF (@s_card is null or @s_card='') or (@n_card is null or @n_card='') RETURN(-1)
+IF dbo.seekkms(@s_card, @n_card)>0 RETURN(0)
+BEGIN TRY 
+  INSERT INTO dbo.kms(id, s_card, n_card, dp) VALUES (@id, @s_card, @n_card, @dp)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modkms')) DROP PROCEDURE dbo.modkms
+GO
+CREATE PROCEDURE dbo.modkms
+ (@in_id int, @s_card varchar(12)=null, @n_card char(32)=null, @dp date=null, @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure Modkms fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(-1)
+
+	IF (@s_card is null or @s_card='') AND (@n_card is null or @n_card='') AND (@dp is null)
+     BEGIN DELETE FROM dbo.kms WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekkms(@s_card, @n_card)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN(0)
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.kms SET s_card=COALESCE(@s_card, s_card), n_card=COALESCE(@n_card, n_card),
+		dp=COALESCE(@dp, dp) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.kms');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModkms','TR') IS NOT NULL DROP TRIGGER uModkms
+GO
+CREATE TRIGGER dbo.uModkms ON dbo.kms
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uModkms trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+--	DECLARE @s_card varchar(12), @n_card varchar(32)
+--	SET @s_card = (SELECT s_card FROM inserted)
+--	SET @n_card = (SELECT n_card FROM inserted)
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @s_card varchar(12), @n_card varchar(32), @dp date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		s_card, n_card, dp FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@s_card, @n_card, @dp
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.kms SET istop=0, version_stop=sysdatetime() WHERE kms.recid=@recid
+
+	INSERT INTO dbo.kms
+	(id, parentid, version_start, version_stop, istop, isdeleted, s_card, n_card, dp) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @s_card, @n_card, @dp)
+
+	UPDATE dbo.kms SET childid=SCOPE_IDENTITY() WHERE kms.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModkms ON dbo.kms
+GO
+
+IF OBJECT_ID('uDelkms','TR') IS NOT NULL DROP TRIGGER uDelkms
+GO
+CREATE TRIGGER dbo.uDelkms ON dbo.kms
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelkms trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.kms SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelkms ON dbo.kms
+GO
+-- Creating dbo.kms table
+*/
+/*
+-- Creating dbo.enp table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.enp')) DROP TABLE dbo.enp
+CREATE TABLE dbo.enp (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+enp char(16), blanc varchar(11), ogrn varchar(13) NOT NULL DEFAULT '1025004642519', okato varchar(5) NOT NULL DEFAULT '45000',
+dp date, dt date, dr date)
+GO
+CREATE CLUSTERED INDEX idx_enp_uniq ON dbo.enp (id, parentid)
+GO 
+ALTER TABLE dbo.enp ADD CONSTRAINT PK_enp PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_enp_unik ON dbo.enp (enp) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekenp')) DROP FUNCTION dbo.seekenp
+GO
+CREATE FUNCTION dbo.seekenp (@enp char(16)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.enp WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekenp')) DROP PROCEDURE dbo.pseekenp
+GO
+CREATE PROCEDURE dbo.pseekenp(@enp char(16)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.enp WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addenp')) DROP PROCEDURE dbo.addenp
+GO
+CREATE PROCEDURE dbo.addenp
+ (@id int, @enp char(16), @ogrn varchar(13)=default, @okato varchar(5)=default, @dp date=null, @dt date=null, @dr date=null, @recid int=0 output)
+AS
+print 'Procedure AddEnp fired!'
+IF (@enp is null or @enp='') RETURN(-1)
+IF dbo.seekenp(@enp)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.enp (id, enp, ogrn, okato, dp, dt, dr) VALUES (@id, @enp, @ogrn, @okato, @dp, @dt, @dr)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modenp')) DROP PROCEDURE dbo.modenp
+GO
+CREATE PROCEDURE dbo.modenp
+ (@in_id int, @enp char(16)=null, @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null,
+  @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModEnp fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF (@enp is null or @enp='') AND (@ogrn is null or @ogrn='') AND (@okato is null or @okato='') AND 
+	   (@dp is null) AND (@dt is null) AND (@dr is null)
+     BEGIN DELETE FROM dbo.enp WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekenp(@enp)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.enp SET enp=COALESCE(@enp, enp), ogrn=COALESCE(@ogrn, ogrn), okato=COALESCE(@okato, okato),
+		dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt), dr=COALESCE(@dr, dr) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.enp');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModEnp','TR') IS NOT NULL DROP TRIGGER uModEnp
+GO
+CREATE TRIGGER dbo.uModEnp ON dbo.enp
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uModEnp trigger fired!'
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @ogrn varchar(13), @enp varchar(16), @okato varchar(5), @dp date, @dt date, @dr date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		enp, ogrn, okato, dp, dt, dr FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@enp, @ogrn, @okato, @dp, @dt, @dr
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.enp SET istop=0, version_stop=sysdatetime() FROM inserted WHERE enp.recid=@recid
+
+	INSERT INTO dbo.enp
+	(id, parentid, version_start, version_stop, istop, isdeleted, enp, ogrn, okato, dp, dt, dr) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @enp, @ogrn, @okato, @dp, @dt, @dr)
+
+	UPDATE dbo.enp SET childid=SCOPE_IDENTITY() WHERE enp.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModEnp ON dbo.enp
+GO
+
+IF OBJECT_ID('uDelEnp','TR') IS NOT NULL DROP TRIGGER uDelEnp
+GO
+CREATE TRIGGER dbo.uDelEnp ON dbo.enp
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelEnp trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.enp SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelEnp ON dbo.enp
+GO
+-- Creating dbo.enp table
+*/
+-- Creating dbo.oldkms table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.oldkms')) DROP TABLE dbo.oldkms
+CREATE TABLE dbo.oldkms (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+s_card varchar(12), n_card varchar(32), ogrn varchar(13), okato varchar(5), dp date, dt date, dr date)
+GO
+CREATE CLUSTERED INDEX idx_oldkms_uniq ON dbo.oldkms (id, parentid)
+GO 
+ALTER TABLE dbo.oldkms ADD CONSTRAINT PK_oldkms PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_oldkms_unik ON dbo.oldkms (s_card,n_card) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekoldkms')) DROP FUNCTION dbo.seekoldkms
+GO
+CREATE FUNCTION dbo.seekoldkms (@s_card varchar(12), @n_card varchar(32)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.oldkms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekoldkms')) DROP PROCEDURE dbo.pseekoldkms
+GO
+CREATE PROCEDURE dbo.pseekoldkms(@s_card varchar(12)='', @n_card varchar(32), @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.oldkms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addoldkms')) DROP PROCEDURE dbo.addoldkms
+GO
+CREATE PROCEDURE dbo.addoldkms
+ (@id int, @s_card varchar(12), @n_card varchar(32), @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null, @recid int=0 output)
+AS
+print 'Procedure AddOldKms fired!'
+IF (@s_card is null or @s_card='') or (@n_card is null or @n_card='') RETURN -1
+IF dbo.seekoldkms(@s_card, @n_card)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.oldkms(id, s_card, n_card, ogrn, okato, dp, dt, dr) VALUES (@id, @s_card, @n_card, @ogrn, @okato, @dp, @dt, @dr)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modoldkms')) DROP PROCEDURE dbo.modoldkms
+GO
+CREATE PROCEDURE dbo.modOldKms
+ (@in_id int, @s_card varchar(12)=null, @n_card char(32)=null, @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null, @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModOldKms fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF (@s_card is null or @s_card='') AND (@n_card is null or @n_card='') AND (@ogrn is null or @ogrn='') AND (@okato is null or @okato='')
+	 AND @dp is null AND @dt is null AND @dr is null
+     BEGIN DELETE FROM dbo.oldkms WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekoldkms(@s_card, @n_card)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.oldkms SET s_card=COALESCE(@s_card, s_card), n_card=COALESCE(@n_card, n_card),
+		ogrn=COALESCE(@ogrn, ogrn), okato=COALESCE(@okato, okato),dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt), dr=COALESCE(@dr, dr)
+		WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.oldkms');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModoldkms','TR') IS NOT NULL DROP TRIGGER uModoldkms
+GO
+CREATE TRIGGER dbo.uModOldKms ON dbo.oldkms
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uModoldkms trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END /*попытка редактировать неактуальныю запись!*/
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @s_card varchar(12), @n_card varchar(32), @ogrn varchar(13), @okato varchar(5), @dp date, @dt date, @dr date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		s_card, n_card, ogrn, okato, dp, dt, dr FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@s_card, @n_card, @ogrn, @okato, @dp, @dt, @dr
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.oldkms SET istop=0, version_stop=sysdatetime() WHERE oldkms.recid=@recid
+
+	INSERT INTO dbo.oldkms
+	(id, parentid, version_start, version_stop, istop, isdeleted, s_card, n_card, ogrn, okato, dp, dt, dr) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @s_card, @n_card, @ogrn, @okato, @dp, @dt, @dr)
+
+	UPDATE dbo.oldkms SET childid=SCOPE_IDENTITY() WHERE oldkms.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModOldKms ON dbo.oldkms
+GO
+
+IF OBJECT_ID('uDeloldkms','TR') IS NOT NULL DROP TRIGGER uDeloldkms
+GO
+CREATE TRIGGER dbo.uDelOldKms ON dbo.oldkms
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelOldKms trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END /*Попытка удалить неактуальную запись!*/
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.oldkms SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelOldKms ON dbo.oldkms
+GO
+-- Creating dbo.oldkms table
+/*
+-- Creating dbo.oldenp table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.oldenp')) DROP TABLE dbo.oldenp
+CREATE TABLE dbo.oldenp (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+enp char(16), blanc varchar(11), ogrn varchar(13), okato varchar(5), dp date, dt date, dr date)
+GO
+CREATE CLUSTERED INDEX idx_oldenp_uniq ON dbo.oldenp (id, parentid)
+GO 
+ALTER TABLE dbo.oldenp ADD CONSTRAINT PK_oldenp PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_oldenp_unik ON dbo.oldenp (enp) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekoldenp')) DROP FUNCTION dbo.seekoldenp
+GO
+CREATE FUNCTION dbo.seekoldenp (@enp char(16)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.oldenp WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldenpsql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekoldenp')) DROP PROCEDURE dbo.pseekoldenp
+GO
+CREATE PROCEDURE dbo.pseekoldenp(@enp char(16)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.oldenp WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldenpsql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addoldenp')) DROP PROCEDURE dbo.addoldenp
+GO
+CREATE PROCEDURE dbo.addoldenp
+ (@id int, @enp char(16), @ogrn varchar(13)=default, @okato varchar(5)=default, @dp date=null, @dt date=null, @dr date=null, @recid int=0 output)
+AS
+print 'Procedure AddOldEnp fired!'
+IF (@enp is null or @enp='') RETURN(-1)
+IF dbo.seekoldenp(@enp)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.oldenp (id, enp, ogrn, okato, dp, dt, dr) VALUES (@id, @enp, @ogrn, @okato, @dp, @dt, @dr)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modoldenp')) DROP PROCEDURE dbo.modoldenp
+GO
+CREATE PROCEDURE dbo.modoldenp
+ (@in_id int, @enp char(16)=null, @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null,
+  @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModOldEnp fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF (@enp is null or @enp='') AND (@ogrn is null or @ogrn='') AND (@okato is null or @okato='') AND 
+	   (@dp is null) AND (@dt is null) AND (@dr is null)
+     BEGIN DELETE FROM dbo.oldenp WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekoldenp(@enp)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.oldenp SET enp=COALESCE(@enp, enp), ogrn=COALESCE(@ogrn, ogrn), okato=COALESCE(@okato, okato),
+		dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt), dr=COALESCE(@dr, dr) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.oldenp');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModOldEnp','TR') IS NOT NULL DROP TRIGGER uModOldEnp
+GO
+CREATE TRIGGER dbo.uModOldEnp ON dbo.oldenp
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uModOldEnp trigger fired!'
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @ogrn varchar(13), @enp varchar(16), @okato varchar(5), @dp date, @dt date, @dr date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		enp, ogrn, okato, dp, dt, dr FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@enp, @ogrn, @okato, @dp, @dt, @dr
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.oldenp SET istop=0, version_stop=sysdatetime() FROM inserted WHERE oldenp.recid=@recid
+
+	INSERT INTO dbo.oldenp
+	(id, parentid, version_start, version_stop, istop, isdeleted, enp, ogrn, okato, dp, dt, dr) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @enp, @ogrn, @okato, @dp, @dt, @dr)
+
+	UPDATE dbo.oldenp SET childid=SCOPE_IDENTITY() WHERE oldenp.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModOldEnp ON dbo.oldenp
+GO
+
+IF OBJECT_ID('uDelOldEnp','TR') IS NOT NULL DROP TRIGGER uDelOldEnp
+GO
+CREATE TRIGGER dbo.uDelOldEnp ON dbo.oldenp
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelOldEnp trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.oldenp SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelOldEnp ON dbo.oldenp
+GO
+-- Creating dbo.oldenp table
+*/
+/*
+-- Creating dbo.enp2 table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.enp2')) DROP TABLE dbo.enp2
+CREATE TABLE dbo.enp2 (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+enp char(16), ogrn varchar(13), okato varchar(5), dp date, dt date, dr date)
+GO
+CREATE CLUSTERED INDEX idx_enp2_uniq ON dbo.enp2 (id, parentid)
+GO 
+ALTER TABLE dbo.enp2 ADD CONSTRAINT PK_enp2 PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_enp2_unik ON dbo.enp2 (enp) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekenp2')) DROP FUNCTION dbo.seekenp2
+GO
+CREATE FUNCTION dbo.seekenp2 (@enp char(16)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.enp2 WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekenp2')) DROP PROCEDURE dbo.pseekenp2
+GO
+CREATE PROCEDURE dbo.pseekenp2(@enp char(16)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.enp2 WHERE enp=@enp AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addenp2')) DROP PROCEDURE dbo.addenp2
+GO
+CREATE PROCEDURE dbo.addenp2
+ (@id int, @enp char(16), @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null, @recid int=0 output)
+AS
+print 'Procedure AddEnp fired!'
+IF @enp is null RETURN -1
+IF dbo.seekenp2(@enp)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.enp2 (id, enp, ogrn, okato, dp, dt, dr) VALUES (@id, @enp, @ogrn, @okato, @dp, @dt, @dr)
+  SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modenp2')) DROP PROCEDURE dbo.modenp2
+GO
+CREATE PROCEDURE dbo.modenp2
+ (@in_id int, @enp char(16)=null, @ogrn varchar(13)=null, @okato varchar(5)=null, @dp date=null, @dt date=null, @dr date=null,
+  @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModEnp2 fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF (@enp is null or @enp='') AND (@ogrn is null or @ogrn='') AND (@okato is null or @okato='') AND  @dp is null AND @dt is null AND @dr is null
+     BEGIN DELETE FROM dbo.enp2 WHERE recid=@in_id RETURN END 
+
+	BEGIN
+	 SET @out_id = dbo.seekenp2(@enp)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.enp2 SET enp=COALESCE(@enp, enp), ogrn=COALESCE(@ogrn, ogrn), okato=COALESCE(@okato, okato),
+		dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt), dr=COALESCE(@dr, dr) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.enp2');
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModEnp2','TR') IS NOT NULL DROP TRIGGER uModEnp2
+GO
+CREATE TRIGGER dbo.uModEnp2 ON dbo.enp2
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	print 'uModEnp2 trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @enp varchar(16), @ogrn varchar(13), @okato varchar(5), @dp date, @dt date, @dr date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		enp, ogrn, okato, dp, dt, dr FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@enp, @ogrn, @okato, @dp, @dt, @dr
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int = (select recid from deleted)
+	UPDATE dbo.enp2 SET istop=0, version_stop=sysdatetime() WHERE enp2.recid=@recid
+
+	INSERT INTO dbo.enp2
+	(id, parentid, version_start, version_stop, istop, isdeleted, enp, ogrn, okato, dp, dt, dr) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @enp, @ogrn, @okato, @dp, @dt, @dr)
+
+	UPDATE dbo.enp2 SET childid=SCOPE_IDENTITY() WHERE enp2.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModEnp2 ON dbo.enp2
+GO
+
+IF OBJECT_ID('uDelEnp2','TR') IS NOT NULL DROP TRIGGER uDelEnp2
+GO
+CREATE TRIGGER dbo.uDelEnp2 ON dbo.enp2
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelEnp2 trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.enp2 SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelEnp2 ON dbo.enp2
+GO
+-- Creating dbo.enp2 table
+*/
+-- Creating dbo.docs table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.docs')) DROP TABLE dbo.docs
+CREATE TABLE dbo.docs (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+c_doc tinyint REFERENCES nsi.viddocs (code), s_doc varchar(9) NOT NULL, n_doc varchar(8) NOT NULL, d_doc date NOT NULL, e_doc date,
+u_doc varchar(max), x_doc tinyint NOT NULL DEFAULT 0)
+GO
+CREATE CLUSTERED INDEX idx_docs_uniq ON dbo.docs (id, parentid)
+GO 
+ALTER TABLE dbo.docs ADD CONSTRAINT PK_docs PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_docs_unik ON dbo.docs (s_doc, n_doc) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekdocs')) DROP FUNCTION dbo.seekdocs
+GO
+CREATE FUNCTION dbo.seekdocs (@s_doc varchar(9), @n_doc varchar(8)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.docs WHERE s_doc=@s_doc AND n_doc=@n_doc AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekdocs')) DROP PROCEDURE dbo.pseekdocs
+GO
+CREATE PROCEDURE dbo.pseekdocs(@s_doc varchar(9)='', @n_doc varchar(8)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM docs WHERE s_doc=@s_doc AND n_doc=@n_doc AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+-- Creating dbo.docs table
+
+-- Creating dbo.enp table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.enp')) DROP TABLE dbo.enp
+CREATE TABLE dbo.enp (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+enp char(16) null, blanc varchar(11) null, ogrn varchar(13) NOT NULL DEFAULT '1025004642519', 
+okato varchar(5) NOT NULL DEFAULT '45000', dp date null, dt date null, dr date null)
+GO
+CREATE CLUSTERED INDEX idx_enp_uniq ON dbo.enp (id, parentid)
+GO 
+ALTER TABLE dbo.enp ADD CONSTRAINT PK_enp PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_enp_unik ON dbo.enp (enp,blanc,ogrn,okato) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekenp')) DROP FUNCTION dbo.seekenp
+GO
+CREATE FUNCTION dbo.seekenp (@enp char(16), @ogrn varchar(13)='1025004642519', @okato varchar(5)='45000') RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.enp WHERE enp=@enp AND ogrn=@ogrn AND okato=@okato AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekenp')) DROP PROCEDURE dbo.pseekenp
+GO
+CREATE PROCEDURE dbo.pseekenp(@enp char(16), @ogrn varchar(13)='1025004642519', @okato varchar(5)='45000', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.enp WHERE enp=@enp AND ogrn=@ogrn AND okato=@okato AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+-- Creating dbo.enp table
+
+-- Creating dbo.kms table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.kms')) DROP TABLE dbo.kms
+CREATE TABLE dbo.kms (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+s_card varchar(12) null, n_card varchar(32), ogrn varchar(13) NOT NULL DEFAULT '1025004642519', okato varchar(5) NOT NULL DEFAULT '45000',
+dp date null, dt date null, dr date null)
+GO
+CREATE CLUSTERED INDEX idx_kms_uniq ON dbo.kms (id, parentid)
+GO 
+ALTER TABLE dbo.kms ADD CONSTRAINT PK_kms PRIMARY KEY (recid asc)
+GO
+CREATE UNIQUE INDEX idx_kms_unik ON dbo.kms (s_card,n_card) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekkms')) DROP FUNCTION dbo.seekkms
+GO
+CREATE FUNCTION dbo.seekkms (@s_card varchar(12), @n_card varchar(32)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.kms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekkms')) DROP PROCEDURE dbo.pseekkms
+GO
+CREATE PROCEDURE dbo.pseekkms(@s_card varchar(12)=null, @n_card varchar(32)=null, @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.kms WHERE s_card=@s_card AND n_card=@n_card AND IsTop=1 AND IsDeleted=0
+END
+GO
+--- The proc is ONLY created for VFP Module oldkmssql and could be deleted immediately after conversion VFP -> MS SQL
+
+-- Creating dbo.kms table
+
+/*
+-- Creating dbo.doc table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.doc')) DROP TABLE dbo.doc
+CREATE TABLE dbo.doc (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+c_doc tinyint REFERENCES nsi.viddocs (code), s_doc varchar(9) NOT NULL, n_doc varchar(8) NOT NULL, d_doc date NOT NULL, e_doc date,
+u_doc varchar(max), x_doc tinyint NOT NULL DEFAULT 0)
+GO
+CREATE CLUSTERED INDEX idx_doc_uniq ON dbo.doc (id, parentid)
+GO 
+ALTER TABLE dbo.doc ADD CONSTRAINT PK_doc PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_doc_unik ON dbo.doc (s_doc, n_doc) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekdoc')) DROP FUNCTION dbo.seekdoc
+GO
+CREATE FUNCTION dbo.seekdoc (@s_doc varchar(9), @n_doc varchar(8)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.doc WHERE s_doc=@s_doc AND n_doc=@n_doc AND IsTop=1
+ --SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ --RETURN @recid
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekdoc')) DROP PROCEDURE dbo.pseekdoc
+GO
+CREATE PROCEDURE dbo.pseekdoc(@s_doc varchar(9)='', @n_doc varchar(8)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM doc WHERE s_doc=@s_doc AND n_doc=@n_doc;
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.adddoc')) DROP PROCEDURE dbo.adddoc
+GO
+CREATE PROCEDURE dbo.adddoc 
+ (@id int, @c_doc tinyint, @s_doc varchar(9), @n_doc varchar(8), @d_doc date, @e_doc date=null,
+  @u_doc varchar(max)=null, @x_doc tinyint=0, @recid int=0 output)
+AS
+print 'Procedure AddDoc fired!'
+IF @c_doc is null OR @s_doc is null OR @n_doc is null OR @d_doc is null RETURN -1
+IF dbo.seekdoc(@s_doc, @n_doc)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.doc (id, c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc) VALUES
+   (@id, @c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, case when @x_doc is not null then @x_doc else 0 end )
+SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+--SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+--RETURN @recid
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.moddoc')) DROP PROCEDURE dbo.moddoc
+GO
+CREATE PROCEDURE dbo.moddoc
+ (@in_id int, @c_doc tinyint, @s_doc varchar(9), @n_doc varchar(8), @d_doc date,
+  @e_doc date, @u_doc varchar(max)=null, @x_doc tinyint=default, @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModDoc fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF @c_doc is null AND @s_doc is null AND @n_doc is null AND  @d_doc is null AND @e_doc is null
+     BEGIN DELETE FROM dbo.doc WHERE recid=@in_id RETURN END
+
+	IF @s_doc IS NOT NULL AND @n_doc IS NOT NULL
+	BEGIN
+	 SET @out_id = dbo.seekdoc(@s_doc, @n_doc)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE doc SET c_doc=COALESCE(@c_doc, c_doc), s_doc=COALESCE(@s_doc, s_doc), n_doc=COALESCE(@n_doc, n_doc),
+		d_doc=COALESCE(@d_doc, d_doc), e_doc=COALESCE(@e_doc, e_doc), x_doc=COALESCE(@x_doc, x_doc),
+		u_doc=COALESCE(@u_doc, u_doc) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.doc');
+--	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+--	RETURN @recid
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModDoc','TR') IS NOT NULL DROP TRIGGER uModDoc
+GO
+CREATE TRIGGER dbo.uModDoc ON dbo.doc
+INSTEAD OF UPDATE
+AS
+--AS IF NOT UPDATE(recid) AND NOT UPDATE(id) AND NOT UPDATE(parentid) AND NOT UPDATE(childid) AND 
+--	NOT UPDATE(version_start) AND NOT UPDATE(version_stop) AND NOT UPDATE(istop) AND NOT UPDATE(isdeleted)
+BEGIN
+	SET NOCOUNT ON
+
+	print 'uModDoc trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @c_doc tinyint, @s_doc varchar(9), @n_doc varchar(8), @d_doc date, @e_doc date, @x_doc tinyint, @u_doc varchar(max)
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, @x_doc
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE dbo.doc SET istop=0, version_stop=sysdatetime() WHERE doc.recid=@recid
+
+	INSERT INTO dbo.doc
+	(id, parentid, version_start, version_stop, istop, isdeleted, c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, case when @x_doc is not null then @x_doc else 0 end )
+
+	UPDATE dbo.doc SET childid=SCOPE_IDENTITY() WHERE doc.recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModDoc ON dbo.doc
+GO
+
+IF OBJECT_ID('uDelDoc','TR') IS NOT NULL DROP TRIGGER uDelDoc
+GO
+CREATE TRIGGER dbo.uDelDoc ON dbo.doc
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelDoc trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE doc SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+--	UPDATE dbo.pers SET docid=NULL WHERE docid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelDoc ON dbo.doc
+GO
+-- Creating dbo.doc table
+*/
+/*
+-- Creating dbo.odoc table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.odoc')) DROP TABLE dbo.odoc
+CREATE TABLE dbo.odoc (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+c_doc tinyint REFERENCES nsi.viddocs (code), s_doc varchar(9) NOT NULL, n_doc varchar(8) NOT NULL, d_doc date NOT NULL, e_doc date,
+u_doc varchar(max), x_doc tinyint NOT NULL DEFAULT 0)
+GO
+CREATE CLUSTERED INDEX idx_odoc_uniq ON dbo.odoc (id, parentid)
+GO 
+ALTER TABLE dbo.odoc ADD CONSTRAINT PK_odoc PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_odoc_unik ON dbo.odoc (s_doc, n_doc) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekodoc')) DROP FUNCTION dbo.seekodoc
+GO
+CREATE FUNCTION dbo.seekodoc (@s_doc varchar(9), @n_doc varchar(8)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.odoc WHERE s_doc=@s_doc AND n_doc=@n_doc AND IsTop=1
+ --SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ --RETURN @recid
+ RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekodoc')) DROP PROCEDURE dbo.pseekodoc
+GO
+CREATE PROCEDURE dbo.pseekodoc(@s_doc varchar(9)='', @n_doc varchar(8)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.odoc WHERE s_doc=@s_doc AND n_doc=@n_doc;
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addodoc')) DROP PROCEDURE dbo.addodoc
+GO
+CREATE PROCEDURE dbo.addodoc 
+ (@c_doc tinyint, @s_doc varchar(9), @n_doc varchar(8), @d_doc date, @e_doc date=null,
+  @u_doc varchar(max)=null, @x_doc tinyint=0, @recid int=0 output)
+AS
+print 'Procedure AddODoc fired!'
+IF @c_doc is null OR @s_doc is null OR @n_doc is null OR @d_doc is null RETURN -1
+IF dbo.seekodoc(@s_doc, @n_doc)>0 RETURN 0
+BEGIN TRY 
+  INSERT INTO dbo.odoc (c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc) VALUES
+   (@c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, case when @x_doc is not null then @x_doc else 0 end )
+SET @recid = SCOPE_IDENTITY();
+END TRY 
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK
+ DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+ SELECT @ErrMsg = ERROR_MESSAGE(), @ErrSeverity = ERROR_SEVERITY()
+ RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+--SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+--RETURN @recid
+RETURN CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+GO 
+
+IF OBJECT_ID('uAddODoc','TR') IS NOT NULL DROP TRIGGER uAddODoc;
+GO
+CREATE TRIGGER dbo.uAddODoc ON dbo.odoc
+AFTER INSERT 
+AS
+BEGIN
+ SET NOCOUNT ON
+ print 'uAddODoc trigger fired!'
+ DECLARE @o_id int = (SELECT id FROM inserted)
+ DECLARE @n_id int = (SELECT recid FROM inserted)
+ DECLARE @tmpid int = CASE WHEN @o_id IS NOT NULL THEN @o_id else @n_id END
+ 
+ UPDATE dbo.odoc SET id=@tmpid FROM inserted WHERE odoc.recid=inserted.recid
+END
+GO
+DISABLE TRIGGER dbo.uAddOdoc ON dbo.odoc
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.mododoc')) DROP PROCEDURE dbo.mododoc
+GO
+CREATE PROCEDURE dbo.mododoc
+ (@in_id int, @c_doc tinyint, @s_doc varchar(9), @n_doc varchar(8), @d_doc date,
+  @e_doc date, @u_doc varchar(max), @x_doc tinyint, @out_id int=0 output)
+AS
+BEGIN TRY 
+	print 'Procedure ModODoc fired!'
+	IF @in_id IS NULL OR @in_id<1 RETURN(0)
+
+	IF @c_doc is null AND @s_doc is null AND @n_doc is null AND  @d_doc is null AND @e_doc is null
+     BEGIN DELETE FROM dbo.odoc WHERE recid=@in_id RETURN END
+
+	IF @s_doc IS NOT NULL AND @n_doc IS NOT NULL
+	BEGIN
+	 SET @out_id = dbo.seekdoc(@s_doc, @n_doc)
+	 IF  @out_id>0 AND @out_id!=@in_id RETURN @out_id
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.odoc SET c_doc=COALESCE(@c_doc, c_doc), s_doc=COALESCE(@s_doc, s_doc), n_doc=COALESCE(@n_doc, n_doc),
+		d_doc=COALESCE(@d_doc, d_doc), e_doc=COALESCE(@e_doc, e_doc), x_doc=COALESCE(@x_doc, x_doc),
+		u_doc=COALESCE(@u_doc, u_doc) WHERE recid=@in_id
+	COMMIT TRANSACTION
+
+	SET @out_id = IDENT_CURRENT('dbo.odoc');
+--	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+--	RETURN @recid
+	RETURN CASE WHEN @out_id IS NULL THEN 0 ELSE @out_id END
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uModOdoc','TR') IS NOT NULL DROP TRIGGER uModOdoc
+GO
+CREATE TRIGGER dbo.uModODoc ON dbo.odoc
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	print 'uModDoc trigger fired!'
+
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @s_doc varchar(9), @n_doc varchar(8)
+	SET @s_doc=(SELECT s_doc FROM inserted)
+	SET @n_doc=(SELECT n_doc FROM inserted)
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @c_doc tinyint, @d_doc date, @e_doc date, @x_doc tinyint, @u_doc varchar(max)
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, @x_doc
+
+	CLOSE newcur
+	DEALLOCATE newcur
+
+	UPDATE dbo.odoc SET istop=0, version_stop=sysdatetime() FROM inserted WHERE odoc.recid=inserted.recid
+
+	INSERT INTO dbo.odoc
+	(id, parentid, version_start, version_stop, istop, isdeleted, c_doc, s_doc, n_doc, d_doc, e_doc, u_doc, x_doc) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @c_doc, @s_doc, @n_doc, @d_doc, @e_doc, @u_doc, case when @x_doc is not null then @x_doc else 0 end )
+
+	DECLARE @recid int= (select recid from deleted)
+
+	UPDATE dbo.odoc SET childid=SCOPE_IDENTITY() FROM deleted WHERE odoc.recid=deleted.recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModODoc ON dbo.odoc
+GO
+
+IF OBJECT_ID('uDelODoc','TR') IS NOT NULL DROP TRIGGER uDelODoc
+GO
+CREATE TRIGGER dbo.uDelODoc ON dbo.odoc
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+	print 'uDelODoc trigger fired!'
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @IsTop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (SELECT recid FROM deleted)
+	UPDATE dbo.odoc SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelODoc ON dbo.odoc
+GO
+-- Creating dbo.odoc table
+*/
+-- Creating dbo.osmo table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.osmo')) DROP TABLE dbo.osmo
+CREATE TABLE dbo.osmo (recid int IDENTITY(1,1), id int NULL, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+enp varchar(16), ogrn varchar(13), okato varchar(5), dp date, dt date)
+GO
+CREATE CLUSTERED INDEX idx_osmo_uniq ON dbo.osmo (id, parentid)
+GO 
+ALTER TABLE dbo.osmo ADD CONSTRAINT PK_osmo PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_osmo_unik ON dbo.osmo (enp) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekosmo')) DROP FUNCTION dbo.seekosmo
+GO
+CREATE FUNCTION dbo.seekosmo (@enp varchar(16)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.osmo WHERE enp=@enp AND IsTop=1 AND IsDeleted=0;
+ SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ RETURN @recid
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekosmo')) DROP PROCEDURE dbo.pseekosmo
+GO
+CREATE PROCEDURE dbo.pseekosmo(@enp varchar(16)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM osmo WHERE enp=@enp;
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addosmo')) DROP PROCEDURE dbo.addosmo
+GO
+CREATE PROCEDURE dbo.addosmo
+ (@enp varchar(16), @ogrn varchar(13), @okato varchar(5), @dp date, @dt date, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @enp is null and @ogrn is null and @okato is null and @dp is null and @dt is null BEGIN RETURN @recid END
+
+	SET @recid = dbo.seekosmo(@enp)
+	IF  @recid>0 RETURN @recid
+	
+	BEGIN TRANSACTION
+	INSERT INTO dbo.osmo (enp,ogrn,okato,dp,dt) VALUES (@enp,@ogrn,@okato,@dp,@dt)
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modosmo')) DROP PROCEDURE dbo.modosmo
+GO
+CREATE PROCEDURE dbo.modosmo
+ (@id int, @enp varchar(16), @ogrn varchar(13), @okato varchar(5), @dp date, @dt date, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @id IS NULL RETURN @recid
+	IF @id<1       RETURN @recid
+
+	IF @enp is null and @ogrn is null and @okato is null and @dp is null and @dt is null BEGIN RETURN @recid END
+	
+	IF @enp IS NOT NULL
+	BEGIN
+		SET @recid = dbo.seekosmo(@enp)
+		IF  @recid>0 AND @recid!=@id RETURN @recid
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.osmo SET enp=COALESCE(@enp, enp), ogrn=COALESCE(@ogrn, ogrn), okato=COALESCE(@okato, okato),
+		dp=COALESCE(@dp, dp), dt=COALESCE(@dt, dt) WHERE recid=@id
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uAddosmo','TR') IS NOT NULL DROP TRIGGER uAddosmo;
+GO
+CREATE TRIGGER dbo.uAddosmo ON dbo.osmo
+AFTER INSERT 
+AS
+BEGIN
+	SET NOCOUNT ON
+
+END
+GO
+DISABLE TRIGGER dbo.uAddosmo ON dbo.osmo
+GO
+
+IF OBJECT_ID('uModosmo','TR') IS NOT NULL DROP TRIGGER uModosmo;
+GO
+CREATE TRIGGER dbo.uModosmo ON dbo.osmo
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50001, 16, 1) RETURN END
+
+	DECLARE @enp varchar(16)
+	SET @enp=(SELECT enp FROM inserted)
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @ogrn varchar(13), @okato varchar(5), @dp date, @dt date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		enp, ogrn, okato, dp, dt
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@enp, @ogrn, @okato, @dp, @dt
+
+	CLOSE newcur;
+	DEALLOCATE newcur;
+
+	UPDATE dbo.osmo SET istop=0, version_stop=sysdatetime() FROM inserted WHERE osmo.recid=inserted.recid
+
+	INSERT INTO dbo.osmo
+	(id, parentid, version_start, version_stop, istop, isdeleted, enp, ogrn, okato, dp, dt) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @enp, @ogrn, @okato, @dp, @dt)
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE dbo.osmo SET childid=SCOPE_IDENTITY() WHERE osmo.recid=@recid
+
+	UPDATE dbo.pers SET osmoid=SCOPE_IDENTITY() WHERE osmoid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModosmo ON dbo.osmo
+GO
+
+IF OBJECT_ID('uDelosmo','TR') IS NOT NULL DROP TRIGGER uDelosmo;
+GO
+CREATE TRIGGER dbo.uDelosmo ON dbo.osmo
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50003, 16, 1) RETURN END
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE osmo SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+	UPDATE dbo.pers SET osmoid=NULL WHERE osmoid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelosmo ON dbo.osmo
+GO
+-- Creating dbo.osmo table
+/*
+-- Creating dbo.permiss table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.permiss')) DROP TABLE dbo.permiss
+CREATE TABLE dbo.permiss (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+c_perm tinyint NOT NULL REFERENCES nsi.permission (code), s_perm varchar(9) NOT NULL, n_perm varchar(8) NOT NULL, d_perm date, e_perm date)
+GO
+CREATE CLUSTERED INDEX idx_permiss_uniq ON dbo.permiss (id, parentid)
+GO 
+ALTER TABLE dbo.permiss ADD CONSTRAINT PK_permiss PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_permiss_unik ON dbo.permiss (s_perm, n_perm) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekpermiss')) DROP FUNCTION dbo.seekpermiss
+GO
+CREATE FUNCTION dbo.seekpermiss (@s_perm varchar(9), @n_perm varchar(8)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.permiss WHERE s_perm=@s_perm AND n_perm=@n_perm AND IsTop=1;
+ SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ RETURN @recid
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekpermiss')) DROP PROCEDURE dbo.pseekpermiss
+GO
+CREATE PROCEDURE dbo.pseekpermiss(@s_perm varchar(9)='', @n_perm varchar(8)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.permiss WHERE s_perm=@s_perm AND n_perm=@n_perm
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addpermiss')) DROP PROCEDURE dbo.addpermiss
+GO
+CREATE PROCEDURE dbo.addpermiss
+ (@c_perm tinyint, @s_perm varchar(9), @n_perm varchar(8), @d_perm date, @e_perm date, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @c_perm is null OR @s_perm is null OR @n_perm is null BEGIN RAISERROR(50501,16,1) RETURN END
+
+--	SET @recid = dbo.seekpermiss(@s_perm, @n_perm)
+--	IF  @recid>0 RETURN @recid
+	
+	BEGIN TRANSACTION
+	INSERT INTO dbo.permiss (c_perm, s_perm, n_perm, d_perm, e_perm) VALUES
+		(@c_perm, @s_perm, @n_perm, @d_perm, @e_perm)
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modpermiss')) DROP PROCEDURE dbo.modpermiss
+GO
+CREATE PROCEDURE dbo.modpermiss
+ (@id int, @c_perm tinyint=null, @s_perm varchar(9)=null, @n_perm varchar(8)=null, @d_perm date=null,
+  @e_perm date=null, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @id IS NULL RETURN @recid
+	IF @id<1       RETURN @recid
+
+	IF @c_perm is null and @s_perm is null and @n_perm is null and  @d_perm is null and @e_perm is null BEGIN RETURN @recid END
+	
+--	IF @s_permiss IS NOT NULL AND @n_permiss IS NOT NULL
+--	BEGIN
+--		SET @recid = dbo.seekdoc(@s_doc, @n_doc)
+--		IF  @recid>0 AND @recid!=@id RETURN @recid
+--	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.permiss SET c_perm=COALESCE(@c_perm, c_perm), s_perm=COALESCE(@s_perm, s_perm), n_perm=COALESCE(@n_perm, n_perm),
+		d_perm=COALESCE(@d_perm, d_perm), e_perm=COALESCE(@e_perm, e_perm) WHERE recid=@id
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uAddPermiss','TR') IS NOT NULL DROP TRIGGER uAddPermiss;
+GO
+CREATE TRIGGER dbo.uAddPermiss ON dbo.permiss
+AFTER INSERT 
+AS
+BEGIN
+	SET NOCOUNT ON
+
+END
+GO
+DISABLE TRIGGER dbo.uAddPermiss ON dbo.permiss
+GO
+
+IF OBJECT_ID('uModPermiss','TR') IS NOT NULL DROP TRIGGER uModPermiss;
+GO
+CREATE TRIGGER dbo.uModPermiss ON dbo.permiss
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50501, 16, 1) RETURN END
+	
+	DECLARE @s_perm varchar(9)
+	DECLARE @n_perm varchar(8)
+	DECLARE @recid int
+	SET @s_perm = (select s_perm from inserted)
+	SET @n_perm = (select n_perm from inserted)
+	SET @recid  = dbo.seekpermiss(@s_perm, @n_perm)
+
+	IF UPDATE(s_perm) OR UPDATE(n_perm)
+	BEGIN 
+		IF @recid>0 BEGIN raiserror(50501,16,1) RETURN END 
+	END 
+
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @c_perm tinyint, @d_perm date, @e_perm date
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		c_perm, s_perm, n_perm, d_perm, e_perm
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@c_perm, @s_perm, @n_perm, @d_perm, @e_perm
+
+	CLOSE newcur;
+	DEALLOCATE newcur;
+
+	UPDATE dbo.permiss SET istop=0, version_stop=sysdatetime() FROM inserted WHERE permiss.recid=inserted.recid
+
+	INSERT INTO dbo.permiss
+	(id, parentid, version_start, version_stop, istop, isdeleted, c_perm, s_perm, n_perm, d_perm, e_perm) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @c_perm, @s_perm, @n_perm, @d_perm, @e_perm)
+
+	SET @recid = (select recid from deleted)
+	UPDATE dbo.permiss SET childid=SCOPE_IDENTITY() WHERE permiss.recid=@recid
+
+	UPDATE dbo.pers SET permid=SCOPE_IDENTITY() WHERE permid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModPermiss ON dbo.permiss
+GO
+
+IF OBJECT_ID('uDelPermiss','TR') IS NOT NULL DROP TRIGGER uDelPermiss;
+GO
+CREATE TRIGGER dbo.uDelPermiss ON dbo.permiss
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50503, 16, 1) RETURN END
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE dbo.permiss SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+	UPDATE dbo.pers SET permid=NULL WHERE permid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelPermiss ON dbo.permiss
+GO
+-- Creating dbo.permiss table
+*/
+/*
+-- Creating dbo.permis2 table
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.permis2')) DROP TABLE dbo.permis2
+CREATE TABLE dbo.permis2 (recid int IDENTITY(1,1), permis2id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+c_perm tinyint NOT NULL REFERENCES nsi.permission (code), s_perm varchar(9) NOT NULL, n_perm varchar(8) NOT NULL, d_perm date, e_perm date)
+GO
+CREATE CLUSTERED INDEX idx_permis2_uniq ON dbo.permis2 (permis2id, parentid)
+GO 
+ALTER TABLE dbo.permis2 ADD CONSTRAINT PK_permis2 PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_permis2_unik ON dbo.permis2 (s_perm, n_perm) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekpermis2')) DROP FUNCTION dbo.seekpermis2
+GO
+CREATE FUNCTION dbo.seekpermis2 (@s_perm varchar(9), @n_perm varchar(8)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.permis2 WHERE s_perm=@s_perm AND n_perm=@n_perm AND IsTop=1;
+ SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ RETURN @recid
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekpermis2')) DROP PROCEDURE dbo.pseekpermis2
+GO
+CREATE PROCEDURE dbo.pseekpermis2(@s_perm varchar(9)='', @n_perm varchar(8)='', @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.permis2 WHERE s_perm=@s_perm AND n_perm=@n_perm
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addpermis2')) DROP PROCEDURE dbo.addpermis2
+GO
+CREATE PROCEDURE dbo.addpermis2
+ (@c_perm tinyint, @s_perm varchar(9), @n_perm varchar(8), @d_perm date, @e_perm date, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @c_perm is null OR @s_perm is null OR @n_perm is null BEGIN RAISERROR(50501,16,1) RETURN END
+
+--	SET @recid = dbo.seekpermis2(@s_perm, @n_perm)
+--	IF  @recid>0 RETURN @recid
+	
+	BEGIN TRANSACTION
+	INSERT INTO dbo.permis2 (c_perm, s_perm, n_perm, d_perm, e_perm) VALUES
+		(@c_perm, @s_perm, @n_perm, @d_perm, @e_perm)
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modpermis2')) DROP PROCEDURE dbo.modpermis2
+GO
+CREATE PROCEDURE dbo.modpermis2
+ (@id int, @c_perm tinyint=null, @s_perm varchar(9)=null, @n_perm varchar(8)=null, @d_perm date=null,
+  @e_perm date=null, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @id IS NULL RETURN @recid
+	IF @id<1       RETURN @recid
+
+	IF @c_perm is null and @s_perm is null and @n_perm is null and  @d_perm is null and @e_perm is null BEGIN RETURN @recid END
+	
+--	IF @s_permis2 IS NOT NULL AND @n_permis2 IS NOT NULL
+--	BEGIN
+--		SET @recid = dbo.seekdoc(@s_doc, @n_doc)
+--		IF  @recid>0 AND @recid!=@id RETURN @recid
+--	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.permis2 SET c_perm=COALESCE(@c_perm, c_perm), s_perm=COALESCE(@s_perm, s_perm), n_perm=COALESCE(@n_perm, n_perm),
+		d_perm=COALESCE(@d_perm, d_perm), e_perm=COALESCE(@e_perm, e_perm) WHERE recid=@id
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uAddpermis2','TR') IS NOT NULL DROP TRIGGER uAddpermis2;
+GO
+CREATE TRIGGER dbo.uAddpermis2 ON dbo.permis2
+AFTER INSERT 
+AS
+BEGIN
+	SET NOCOUNT ON
+
+END
+GO
+DISABLE TRIGGER dbo.uAddpermis2 ON dbo.permis2
+GO
+
+IF OBJECT_ID('uModpermis2','TR') IS NOT NULL DROP TRIGGER uModpermis2;
+GO
+CREATE TRIGGER dbo.uModpermis2 ON dbo.permis2
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50501, 16, 1) RETURN END
+	
+	DECLARE @s_perm varchar(9)
+	DECLARE @n_perm varchar(8)
+	DECLARE @recid int
+	SET @s_perm = (select s_perm from inserted)
+	SET @n_perm = (select n_perm from inserted)
+	SET @recid  = dbo.seekpermis2(@s_perm, @n_perm)
+
+	IF UPDATE(s_perm) OR UPDATE(n_perm)
+	BEGIN 
+		IF @recid>0 BEGIN raiserror(50501,16,1) RETURN END 
+	END 
+
+	DECLARE @permis2id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @c_perm tinyint, @d_perm date, @e_perm date
+
+	DECLARE newcur CURSOR FOR SELECT
+		permis2id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		c_perm, s_perm, n_perm, d_perm, e_perm
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @permis2id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@c_perm, @s_perm, @n_perm, @d_perm, @e_perm
+
+	CLOSE newcur;
+	DEALLOCATE newcur;
+
+	UPDATE dbo.permis2 SET istop=0, version_stop=sysdatetime() FROM inserted WHERE permis2.recid=inserted.recid
+
+	INSERT INTO dbo.permis2
+	(permis2id, parentid, version_start, version_stop, istop, isdeleted, c_perm, s_perm, n_perm, d_perm, e_perm) VALUES
+	 (@permis2id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @c_perm, @s_perm, @n_perm, @d_perm, @e_perm)
+
+	SET @recid = (select recid from deleted)
+	UPDATE dbo.permis2 SET childid=SCOPE_IDENTITY() WHERE permis2.recid=@recid
+
+	UPDATE dbo.pers SET permid=SCOPE_IDENTITY() WHERE permid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModpermis2 ON dbo.permis2
+GO
+
+IF OBJECT_ID('uDelpermis2','TR') IS NOT NULL DROP TRIGGER uDelpermis2;
+GO
+CREATE TRIGGER dbo.uDelpermis2 ON dbo.permis2
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50503, 16, 1) RETURN END
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE dbo.permis2 SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+	UPDATE dbo.pers SET permid=NULL WHERE permid=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelpermis2 ON dbo.permis2
+GO
+-- Creating dbo.permis2 table
+*/
+
+-- Creating dbo.adr77
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.adr77')) DROP TABLE dbo.adr77
+CREATE TABLE dbo.adr77 (recid int IDENTITY(1,1), id int, 
+parentid int NULL, childid int NULL, version_start datetime default sysdatetime(), version_stop datetime NULL,
+istop bit NOT NULL DEFAULT 1, isdeleted bit NOT NULL DEFAULT 0,
+ul int NOT NULL, dom varchar(7) NOT NULL, kor varchar(5), [str] varchar(5), kv varchar(5) NOT NULL, d_reg date)
+GO
+CREATE CLUSTERED INDEX idx_adr77_uniq ON dbo.adr77 (id, parentid)
+GO 
+ALTER TABLE dbo.adr77 ADD CONSTRAINT PK_adr77 PRIMARY KEY (recid ASC)
+GO
+CREATE UNIQUE INDEX idx_adr77_unik ON dbo.adr77 (ul,dom,kor,[str],kv) INCLUDE (recid) WHERE IsTop=1 AND IsDeleted=0
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.seekadr77')) DROP FUNCTION dbo.seekadr77
+GO
+CREATE FUNCTION dbo.seekadr77 (@ul int, @dom varchar(7), @kor varchar(5), @str varchar(5), @kv varchar(5)) RETURNS int
+BEGIN
+ DECLARE @recid int
+ SELECT @recid=recid FROM dbo.adr77 WHERE ul=@ul AND dom=@dom	 AND kor=@kor AND str=@str AND kv=@kv AND IsTop=1
+ SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+ RETURN @recid
+END
+GO 
+
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.pseekadr77')) DROP PROCEDURE dbo.pseekadr77
+GO
+CREATE PROCEDURE dbo.pseekadr77(@ul int, @dom varchar(7), @kor varchar(5), @str varchar(5), @kv varchar(5), @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM dbo.adr77 WHERE ul=@ul AND dom=@dom AND kor=@kor AND str=@str AND kv=@kv
+END
+GO
+--- The proc is ONLY created for VFP Module kms2sql and could be deleted immediately after conversion VFP -> MS SQL
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.addadr77')) DROP PROCEDURE dbo.addadr77
+GO
+CREATE PROCEDURE dbo.addadr77
+ (@ul int, @dom varchar(7), @kor varchar(5), @str varchar(5), @kv varchar(5), @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @ul is null OR @dom is null OR @kv is null BEGIN RAISERROR(50601,16,1) RETURN END
+
+	BEGIN TRANSACTION
+	INSERT INTO dbo.adr77 (ul, dom, kor, [str], kv) VALUES
+		(@ul, @dom, @kor, @str, @kv)
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg AS nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF EXISTS (SELECT * FROM sys.objects WHERE OBJECT_ID=OBJECT_ID('dbo.modadr77')) DROP PROCEDURE dbo.modadr77
+GO
+CREATE PROCEDURE dbo.modadr77
+ (@id int, @ul int=null, @dom varchar(7)=null, @kor varchar(5)=null, @str varchar(5)=null, @kv varchar(5)=null, @recid int=0 output)
+AS
+BEGIN TRY 
+	IF @id IS NULL RETURN(-1)
+	IF @id<1       RETURN(-1)
+
+	IF @ul is null and @dom is null and @kor is null and  @str is null and @kv is null RETURN(-1)
+	
+	IF @ul IS NOT NULL AND @dom IS NOT NULL AND @kv IS NOT NULL
+	BEGIN
+		SET @recid = dbo.seekadr77(@ul, @dom, @kor, @str, @kv)
+		IF  @recid>0 AND @recid!=@id RETURN @recid
+	END 
+	
+	BEGIN TRANSACTION
+	UPDATE dbo.adr77 SET ul=COALESCE(@ul, ul), dom=COALESCE(@dom, dom), kor=COALESCE(@kor, kor),
+		[str]=COALESCE(@str, [str]), kv=COALESCE(@kv, kv) WHERE recid=@id
+	COMMIT TRANSACTION
+
+	SET @recid = SCOPE_IDENTITY();
+	SET @recid=CASE WHEN @recid IS NULL THEN 0 ELSE @recid END
+	RETURN @recid
+END TRY 
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK
+	DECLARE @ErrMsg nvarchar(4000), @ErrSeverity int
+	SELECT @ErrMsg = ERROR_MESSAGE(),
+           @ErrSeverity = ERROR_SEVERITY()
+	RAISERROR(@ErrMsg, @ErrSeverity, 1)
+END CATCH
+GO 
+
+IF OBJECT_ID('uAddAdr77','TR') IS NOT NULL DROP TRIGGER uAddAdr77;
+GO
+CREATE TRIGGER dbo.uAddAdr77 ON dbo.adr77
+AFTER INSERT 
+AS
+BEGIN
+	SET NOCOUNT ON
+END
+GO
+DISABLE TRIGGER dbo.uAddAdr77 ON dbo.adr77
+GO
+
+IF OBJECT_ID('uModAdr77','TR') IS NOT NULL DROP TRIGGER uModAdr77
+GO
+CREATE TRIGGER dbo.uModAdr77 ON dbo.adr77
+INSTEAD OF UPDATE
+AS
+BEGIN
+	SET NOCOUNT ON
+	
+	DECLARE @IsTop bit
+	SET @IsTop = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50601, 16, 1) RETURN END
+	/*
+	DECLARE @s_perm varchar(9)
+	DECLARE @n_perm varchar(8)
+	*/
+	DECLARE @recid int
+	/*
+	SET @s_perm = (select s_perm from inserted)
+	SET @n_perm = (select n_perm from inserted)
+	SET @recid  = dbo.seekpermis2(@s_perm, @n_perm)
+
+	IF UPDATE(s_perm) OR UPDATE(n_perm)
+	BEGIN 
+		IF @recid>0 BEGIN raiserror(50501,16,1) RETURN END 
+	END 
+	*/
+	DECLARE @id int, @parentid int, @version_start datetime, @version_stop datetime,
+		@isdeleted bit, @ul int, @dom varchar(7), @kor varchar(5), @str varchar(5), @kv varchar(5)
+
+	DECLARE newcur CURSOR FOR SELECT
+		id, recid AS parentid, sysdatetime() as version_start, null as version_stop, 1 as istop, 0 as isdeleted,
+		ul, dom, kor, str, kv
+		FROM inserted
+
+	OPEN newcur
+
+	FETCH NEXT FROM newcur INTO @id, @parentid, @version_start, @version_stop ,@istop, @isdeleted,
+		@ul, @dom, @kor, @str, @kv
+
+	CLOSE newcur;
+	DEALLOCATE newcur;
+
+	UPDATE dbo.adr77 SET istop=0, version_stop=sysdatetime() FROM inserted WHERE adr77.recid=inserted.recid
+
+	INSERT INTO dbo.adr77
+	(id, parentid, version_start, version_stop, istop, isdeleted, ul, dom, kor, str, kv) VALUES
+	 (@id, @parentid, @version_start, @version_stop, @istop, @isdeleted, @ul, @dom, @kor, @str, @kv)
+
+	SET @recid = (select recid from deleted)
+	UPDATE dbo.adr77 SET childid=SCOPE_IDENTITY() WHERE recid=@recid
+
+	UPDATE dbo.pers SET adr_id=SCOPE_IDENTITY() WHERE adr_id=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uModAdr77 ON dbo.adr77
+GO
+
+IF OBJECT_ID('uDelAdr77','TR') IS NOT NULL DROP TRIGGER uDelAdr77
+GO
+CREATE TRIGGER dbo.uDelAdr77 ON dbo.adr77
+INSTEAD OF DELETE
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @IsTop bit = (SELECT istop FROM deleted)
+	IF @istop=0	BEGIN RAISERROR(50603, 16, 1) RETURN END
+
+	DECLARE @recid int= (select recid from deleted)
+	UPDATE dbo.adr77 SET version_stop=sysdatetime(), istop=0, isdeleted=1 WHERE recid=@recid
+
+	UPDATE dbo.pers SET adr_id=NULL WHERE adr_id=@recid
+
+END
+GO
+DISABLE TRIGGER dbo.uDelAdr77 ON dbo.adr77
+GO
+-- Creating dbo.adr77
+
+-- Creating dbo.adr50
+IF OBJECT_ID('dbo.adr50') IS NOT NULL AND OBJECTPROPERTY(OBJECT_ID('dbo.adr50'), 'IsTable')=1 DROP TABLE dbo.adr50
+CREATE TABLE dbo.adr50(recid int IDENTITY(1,1), c_okato varchar(5), ra_name varchar(60), np_c tinyint NULL REFERENCES nsi.np_c(code),
+	 np_name varchar(60), ul_c tinyint NULL REFERENCES nsi.ul_c(code), ul_name varchar(60), dom varchar(7), kor varchar(5),
+	 [str] varchar(5), kv varchar(5), d_reg date, CONSTRAINT PK_adr50 PRIMARY KEY CLUSTERED (recid ASC))
+GO
+CREATE UNIQUE INDEX unik ON adr50 (c_okato, ra_name, np_name, ul_name, dom, kor, [str], kv)
+GO
+IF OBJECT_ID('seekadr50','P') IS NOT NULL DROP PROCEDURE seekadr50
+GO
+CREATE PROCEDURE dbo.seekadr50(@c_okato varchar(5)='', @ra_name varchar(60)='', @np_name varchar(60)='',
+	 @ul_name varchar(60)='',@dom varchar(7)='', @kor varchar(5)='', @str varchar(5)='', @kv varchar(5)='',
+	 @recid int=NULL out)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM adr50 WHERE c_okato=@c_okato AND ra_name=@ra_name AND np_name=@np_name AND ul_name=@ul_name
+	AND dom=@dom AND kor=@kor AND [str]=@str AND kv=@kv;
+END
+GO
+-- Creating dbo.adr50
+
+CREATE TABLE [dbo].[answers](
+[recid] int IDENTITY(0,1), [kmsid] int, [data] date, [tiperz] varchar(15), [sn_pol] varchar(17), [enp] varchar(16), 
+[s_card] varchar(6), [n_card] varchar(10), [date_b] date, [date_e] date, [q] varchar(2), [q_ogrn] varchar(13), [fam] varchar(25),
+[im] varchar(25), [ot] varchar(25), [dr] date, [w] TINYINT NOT NULL, [ans_r] varchar(3), [snils] varchar(14), [c_doc] tinyint,
+[s_doc] varchar(9), [n_doc] varchar(8), [d_doc] date, [gr] varchar(3), [erz] varchar(1), [tip_d] varchar(1),
+[okato] varchar(5), [npp] tinyint, [err] varchar(150), [created] datetime default sysdatetime(),
+CONSTRAINT [PK_answers] PRIMARY KEY CLUSTERED ([recid] ASC)
+)
+GO
+CREATE INDEX idx_kmsid ON answers (kmsid)
+GO
+
+CREATE TABLE [dbo].[errors](
+[rid] int IDENTITY(0,1),
+[recid] int, [data] date, [err] varchar(5), [comment] varchar(max), [c_t] varchar(5), [pid] varchar(16), [ans_fl] varchar(2),
+[step] varchar(4), [v] bit, [dcor] date, [fname] varchar(25),
+[created] datetime default sysdatetime(),
+CONSTRAINT [PK_errors] PRIMARY KEY CLUSTERED ([rid] ASC))
+GO
+CREATE INDEX recid ON errors (recid)
+GO
+CREATE INDEX recidn ON errors (recid) WHERE dcor IS NOT NULL
+GO
+CREATE INDEX unik ON errors (fname, recid)
+GO
+
+/*
+CREATE TABLE [dbo].[moves](
+[recid] int IDENTITY(0,1),
+[et] varchar(1), [fname] varchar(25), [mkdate] smalldatetime, [kmsid] int, [frecid] varchar(6),
+[vs] varchar(9), [s_card] varchar(6), [n_card] varchar(10), [c_okato] varchar(5), [enp] varchar(16), [dp] date, [jt] varchar(1),
+[scn] varchar(3), [pricin] varchar(3), [tranz] varchar(3), [q] varchar(2), [err] varchar(5), [err_text] varchar(max),
+[ans_fl] varchar(2), [nz] dec(3), [n_kor] dec(6), [fam] varchar(25), [im] varchar(20), [ot] varchar(20), [w] TINYINT NOT NULL, 
+[dr] date, [c_doc] tinyint, [s_doc] varchar(9), [n_doc] varchar(8), [d_doc] date, [e_doc] date,
+[created] datetime default sysdatetime(),
+CONSTRAINT [PK_moves] PRIMARY KEY CLUSTERED ([recid] ASC))
+GO
+CREATE INDEX kmsid ON moves (kmsid)
+GO
+CREATE INDEX fiorecid ON moves (kmsid) WHERE et='1'
+GO 
+CREATE INDEX ffrecid ON moves (kmsid) WHERE et='2'
+GO
+CREATE INDEX unik ON moves (fname, frecid)
+GO
+*/
+
+CREATE TABLE dbo.ofio(recid int IDENTITY(1,1),
+fam varchar(40), im varchar(40), ot varchar(40), dr date, w tinyint NULL REFERENCES nsi.sex,
+created datetime default sysdatetime(),
+CONSTRAINT PK_ofio PRIMARY KEY CLUSTERED (recid ASC))
+GO
+
+
+CREATE TABLE [dbo].[predst](
+[recid] int IDENTITY(1,1),
+[fam] varchar(40), [im] varchar(40), [ot] varchar(40), [c_doc] dec(2), [s_doc] varchar(9), [n_doc] varchar(8), [d_doc] date,
+[u_doc] varchar(100), [tel1] varchar(10), [tel2] varchar(10), [inf] varchar(100),
+[created] datetime default sysdatetime(),
+CONSTRAINT [PK_predst] PRIMARY KEY CLUSTERED ([recid] ASC))
+GO
+--INSERT INTO predst (fam,im,ot,c_doc,s_doc,n_doc,d_doc,u_doc,tel1,tel2,inf) values
+--  ('','','',0,'','',NULL,NULL,'','','')
+--GO
+CREATE INDEX fio ON predst (fam,im,ot)
+GO
+CREATE PROCEDURE [dbo].[seekpredst]
+(
+@fam varchar(40)='', @im varchar(40)='', @ot varchar(40)='', @recid int=NULL out
+)
+AS
+BEGIN
+SET NOCOUNT ON;
+SELECT recid FROM predst WHERE fam=@fam AND im=@im AND ot=@ot;
+END
+GO
+
+CREATE TABLE [dbo].[users](
+[recid] int IDENTITY(1,1),
+[pv] varchar(3), [ucod] int, [id] varchar(8), [fam] varchar(25), [im] varchar(20), [ot] varchar(20), [kadr] dec(1),
+[created] datetime default sysdatetime(),
+CONSTRAINT [PK_users] PRIMARY KEY CLUSTERED ([recid] ASC))
+GO
+CREATE INDEX ucod ON users (ucod)
+GO
+
+CREATE TABLE [dbo].[wrkpl](
+[recid] int IDENTITY(1,1),
+[code] varchar(3), [name] varchar(100),
+[created] datetime default sysdatetime(),
+CONSTRAINT [PK_wrkpl] PRIMARY KEY CLUSTERED ([recid] ASC))
+GO
+--INSERT INTO wrkpl (code,name) values ('','')
+--GO
+CREATE INDEX name ON wrkpl (name)
+GO
+
+print 'Run CreateRelationship next!'
